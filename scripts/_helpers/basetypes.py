@@ -1,181 +1,140 @@
-from enum import Enum
-from typing import Optional, Callable, Any
-from ape_accounts.accounts import KeyfileAccount
-from ape.contracts.base import ContractContainer, ContractInstance
+# ruff: noqa: PLR6301, ARG002
+
+import hashlib
+import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from ape import project
-from functools import cached_property
+from enum import Enum
+from typing import Any
 
-Environment = Enum('Environment', ['local', 'dev', 'int', 'prod'])
+from ape.contracts.base import ContractContainer, ContractInstance
+from ape_accounts.accounts import KeyfileAccount
+from rich import print as rprint
+from rich.markup import escape
+
+Environment = Enum("Environment", ["local", "dev", "int", "prod"])
 
 
-class ContractConfig():
-    pass
+def abi_key(abi: list) -> str:
+    json_dump = json.dumps(abi, sort_keys=True)
+    _hash = hashlib.sha1(json_dump.encode("utf8"))
+    return _hash.hexdigest()
 
 
 @dataclass
-class DeploymentContext():
-
-    contract: dict[str, ContractConfig]
+class DeploymentContext:
+    contracts: dict[str, Any]
     env: Environment
     owner: KeyfileAccount
-    pools: list[str]
     config: dict[str, Any] = field(default_factory=dict)
-    gas_func: Callable = None
+    gas_func: Callable | None = None
+    dryrun: bool = False
 
     def __getitem__(self, key):
-        if key in self.contract:
-            return self.contract[key]
-        elif key in self.config:
-            return self.config[key]
-        else:
-            return self.pool_contract[key]
+        if key in self.contracts:
+            return self.contracts[key]
+        return self.config[key]
+
+    def __contains__(self, key):
+        return key in self.contracts or key in self.config
 
     def keys(self):
-        return self.contract.keys() | self.config.keys()
+        return self.contracts.keys() | self.config.keys()
 
     def gas_options(self):
         return self.gas_func(self) if self.gas_func is not None else {}
 
-    @cached_property
-    def pool_contract(self):
-        return {(pool, c.name): k for k, c in self.contract.items() for pool in (c.pools or [])}
-
 
 @dataclass
-class ContractConfig():
-
-    name: str
-    contract: Optional[ContractInstance]
-    container: ContractContainer
-    nft: bool = False
-    container_name: str = None
-    scope: Optional[str] = None
-    pools: Optional[list[str]] = None
+class ContractConfig:
+    key: str
+    contract: ContractInstance | None
+    container: ContractContainer | None
     deployment_deps: set[str] = field(default_factory=set)
     config_deps: dict[str, Callable] = field(default_factory=dict)
+    deployment_args: list[Any] = field(default_factory=list)
+    abi_key: str | None = None
+    version: str | None = None
+
+    nft: bool = False
 
     def deployable(self, context: DeploymentContext) -> bool:
-        return False
+        return True
 
     def deployment_dependencies(self, context: DeploymentContext) -> set[str]:
         return self.deployment_deps
 
+    def deployment_args_values(self, context: DeploymentContext) -> list[Any]:
+        values = [context[c] if c in context else c for c in self.deployment_args]  # noqa: SIM401
+        return [v.contract if isinstance(v, ContractConfig) else v for v in values]
+
+    def deployment_args_repr(self, context: DeploymentContext) -> list[Any]:
+        return [f"[blue]{escape(c)}[/blue]" if c in context else c for c in self.deployment_args]
+
+    def deployment_options(self, context: DeploymentContext) -> dict[str, Any]:
+        return {"sender": context.owner} | context.gas_options()
+
     def config_dependencies(self, context: DeploymentContext) -> dict[str, Callable]:
         return self.config_deps
-
-    def deploy(self, context: DeploymentContext, dryrun: bool = False) -> ContractConfig:
-        pass
-
-    def config_dependency(self, contract: ContractConfig, context: DeploymentContext, dryrun: bool = False):
-        pass
 
     def address(self):
         return self.contract.address if self.contract else None
 
-    def key(self):
-        return f"{self.scope}.{self.name}" if self.scope else self.name
-
-    def config_key(self):
-        return self.name
-
-    def pool(self):
-        return self.name.split(".")[0] if "." in self.name else None
+    def container_name(self):
+        return self.container.contract_type.name if self.container else None
 
     def __str__(self):
-        return self.name
+        return self.key
 
     def __repr__(self):
-        return f"Contract[name={self.name}, scope={self.scope},nft={self.nft}, contract={self.contract}, container_name={self.container_name}]"
+        return f"Contract[key={self.key}, contract={self.contract}, container_name={self.container_name()}]"
 
+    def load_contract(self, address: str):
+        self.contract = self.container.at(address)
 
-@dataclass
-class ExternalContract(ContractConfig):
-
-    def deployable(self, context: DeploymentContext) -> bool:
-        return context.env != Environment.prod
-
-    def deploy(self, context: DeploymentContext, dryrun: bool = False):
+    def deploy(self, context: DeploymentContext):
         if self.contract is not None:
-            print(f"WARNING: Deployment will override contract *{self.name}* at {self.contract}")
+            rprint(
+                f"[dark_orange bold]WARNING[/]: Deployment will override contract [blue bold]{self.key}[/] at {self.contract}"
+            )
         if not self.deployable(context):
-            raise Exception(f"Cant deploy contract {self} in current context")
-        kwargs = {"sender": context.owner} | context.gas_options()
-        kwargs_str = ",".join(f"{k}={v}" for k, v in kwargs.items())
-        print(f"## {self.name} <- {self.container_name}.deploy({kwargs_str})")
-        if not dryrun:
-            self.contract = self.container.deploy(**kwargs)
-
-
-class NFT(ExternalContract):
-
-    def __init__(self, name: str, contract: Optional[ContractInstance]):
-        super().__init__(name, contract, project.ERC721, nft=True, container_name="ERC721")
-
-
-class GenericExternalContract(ExternalContract):
-
-    _address: str
-
-    def __init__(self, name: str, address: str):
-        super().__init__(name, None, None)
-        self._address = address
-
-    def address(self):
-        return self._address
-
-    def deployable(self, contract: DeploymentContext) -> bool:
-        return False
-
-    def __repr__(self):
-        return f"GenericExternalContract[name={self.name}, address={self._address}]"
-
-
-@dataclass
-class InternalContract(ContractConfig):
-
-    deployment_args_contracts: list[Any] = field(default_factory=list)
-
-    def deployment_args(self, context: DeploymentContext) -> list[Any]:
-        return [context[c].contract for c in self.deployment_args_contracts]
-
-    def deployment_options(self, context: DeploymentContext) -> dict[str, Any]:
-        return {'sender': context.owner} | context.gas_options()
-
-    def deployable(self, contract: DeploymentContext) -> bool:
-        return True
-
-    def deploy(self, context: DeploymentContext, dryrun: bool = False) -> ContractConfig:
-        if self.contract is not None:
-            print(f"WARNING: Deployment will override contract *{self.name}* at {self.contract}")
-        if not self.deployable(context):
-            raise Exception(f"Cant deploy contract {self} in current context")
-        print_args = self.deployment_args_contracts
+            raise Exception(f"Cant deploy contract {self} in current context")  # noqa: TRY002
+        print_args = self.deployment_args_repr(context)
         kwargs = self.deployment_options(context)
-        kwargs_str = ",".join(f"{k}={v}" for k, v in kwargs.items())
-        print(f"## {self.pools} {self.name} <- {self.container_name}.deploy({','.join(str(a) for a in print_args)}, {kwargs_str})")
-        if not dryrun:
-            self.contract = self.container.deploy(*self.deployment_args(context), **kwargs)
+        kwargs_str = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+        rprint(
+            f"Deploying [blue]{self.key}[/blue] <- {self.container_name()}.deploy({', '.join(str(a) for a in print_args)}, {kwargs_str})"  # noqa: E501
+        )
+
+        if not context.dryrun:
+            deploy_args = self.container.constructor.encode_input(*self.deployment_args_values(context))
+            rprint(f"Deployment args for [blue]{self.key}[/]: [bright_black]{deploy_args.hex()}[/]")
+
+            self.contract = self.container.deploy(*self.deployment_args_values(context), **kwargs)
+            self.abi_key = abi_key(self.contract.contract_type.dict()["abi"])
 
 
 @dataclass
-class MinimalProxy(InternalContract):
-
+class MinimalProxy(ContractConfig):
     impl: str = ""
     factory_func: str = "create_proxy"
 
-
-    def deploy(self, context: DeploymentContext, dryrun: bool = False) -> ContractConfig:
+    def deploy(self, context: DeploymentContext):
         if self.contract is not None:
-            print(f"WARNING: Deployment will override contract *{self.name}* at {self.contract}")
+            rprint(
+                f"[dark_orange bold]WARNING[/dark_orange bold]: Deployment will override contract [blue bold]{self.key}[/blue bold] at {self.contract}"  # noqa: E501
+            )
         if not self.deployable(context):
-            raise Exception(f"Cant deploy contract {self} in current context")
-
+            raise Exception(f"Cant deploy contract {self} in current context")  # noqa: TRY002
         impl_contract = context[self.impl].contract
-        print_args = self.deployment_args_contracts
+        print_args = self.deployment_args_repr(context)
         kwargs = self.deployment_options(context)
         kwargs_str = ",".join(f"{k}={v}" for k, v in kwargs.items())
-        print(f"## {self.pools} {self.name} <- {self.impl}.invoke_transaction({self.factory_func}, {','.join(str(a) for a in print_args)}, {kwargs_str})")
-        if not dryrun:
-            tx = impl_contract.invoke_transaction(self.factory_func, *self.deployment_args(context), **kwargs)
+        rprint(
+            f"Deploying Proxy [blue]{self.key}[/blue] <- {self.impl}.{self.factory_func}({', '.join(str(a) for a in print_args)}, {kwargs_str})"  # noqa: E501
+        )
+
+        if not context.dryrun:
+            tx = impl_contract.invoke_transaction(self.factory_func, *self.deployment_args_values(context), **kwargs)
             self.contract = self.container.at(tx.return_value)
+            self.abi_key = abi_key(self.contract.contract_type.dict()["abi"])

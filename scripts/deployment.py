@@ -1,10 +1,13 @@
-import logging
-import warnings
-import os
-import click
-from ape.cli import network_option, NetworkBoundCommand
+# ruff: noqa: ERA001
 
+import logging
+import os
+import warnings
+
+import click
 from ape import convert
+from ape.cli import ConnectedProviderCommand
+from rich import print
 
 from ._helpers.deployment import DeploymentManager, Environment
 
@@ -15,12 +18,11 @@ logger.setLevel(logging.WARNING)
 warnings.filterwarnings("ignore")
 
 
-def gas_cost(context):
-    return {'gas_price': convert('10 gwei', int)}
+def gas_cost(context):  # noqa: ARG001
+    return {"gas_price": convert("10 gwei", int)}
 
 
-@click.command(cls=NetworkBoundCommand)
-@network_option()
+@click.command(cls=ConnectedProviderCommand)
 def cli(network):
     print(f"Connected to {network}")
 
@@ -29,10 +31,11 @@ def cli(network):
 
     changes = set()
     # changes |= {
-    #     "eth-grails.loans",
+    #     # "configs.max_penalty_fee_weth",
+    #     # "eth-grails.loans",
+    #     # "common.nftx_marketplace_zap",
     # }
 
     dm.deploy(changes, dryrun=True)
 
     print("Done")
-
